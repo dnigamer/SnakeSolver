@@ -9,21 +9,17 @@ from collections import deque
 bounding_box = (2037, 344, 465, 494)
 grid_size = (14, 13)  # Number of grid cells in the game
 
-# Load template images (example paths)
-food_templates = [
-    cv2.imread(f'assets/food{i}.png', cv2.IMREAD_GRAYSCALE) for i in range(1, 13)
-]
+# Load template images
+food_templates = [cv2.imread(f'assets/food{i}.png', cv2.IMREAD_GRAYSCALE) for i in range(1, 13)]
 snake_head_templates = {
     'up': cv2.imread('assets/head_up.png', cv2.IMREAD_GRAYSCALE),
     'down': cv2.imread('assets/head_down.png', cv2.IMREAD_GRAYSCALE),
     'left': cv2.imread('assets/head_left.png', cv2.IMREAD_GRAYSCALE),
     'right': cv2.imread('assets/head_right.png', cv2.IMREAD_GRAYSCALE),
 }
-snake_body_template = cv2.imread('assets/body.png', cv2.IMREAD_GRAYSCALE)
-snake_tail_template = cv2.imread('assets/tail.png', cv2.IMREAD_GRAYSCALE)
 
 # Template matching threshold
-template_thresh = 0.83  # Lower threshold to capture lighter images
+template_thresh = 0.83
 
 # Frame skip to reduce processing load
 frame_skip = 5
@@ -33,9 +29,10 @@ current_path = None
 previous_food_position = None
 snake_head_grid = None
 food_grid = None
-snake_body_positions = []
 frame_count = 0
 
+# Initialize a lock for thread synchronization
+lock = threading.Lock()
 
 def detect_with_template(frame, template):
     """Detect objects in the frame using template matching."""
@@ -46,12 +43,10 @@ def detect_with_template(frame, template):
         return max_loc[0] + template.shape[1] // 2, max_loc[1] + template.shape[0] // 2
     return None
 
-
 def preprocess_frame(frame):
     """Preprocess the frame to improve template matching."""
     gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     return cv2.GaussianBlur(gray_frame, (5, 5), 0)
-
 
 def detect_food(frame):
     """Detect food in the frame using multiple templates."""
@@ -62,7 +57,6 @@ def detect_food(frame):
             return food_position
     return None
 
-
 def detect_snake_head(frame):
     """Detect the snake's head and direction."""
     gray_frame = preprocess_frame(frame)
@@ -72,38 +66,25 @@ def detect_snake_head(frame):
             return head_position, direction
     return None, None
 
-
-def detect_snake_body(frame):
-    """Detect the snake's body and tail."""
-    gray_frame = preprocess_frame(frame)
-    body_positions = []
-    tail_position = detect_with_template(gray_frame, snake_tail_template)
-    body_position = detect_with_template(gray_frame, snake_body_template)
-    if body_position:
-        # Convert the body position to grid coordinates
-        grid_position = (body_position[1] // (bounding_box[3] // grid_size[0]),
-                         body_position[0] // (bounding_box[2] // grid_size[1]))
-        # Exclude the tail position from body positions
-        if tail_position:
-            tail_grid_position = (tail_position[1] // (bounding_box[3] // grid_size[0]),
-                                  tail_position[0] // (bounding_box[2] // grid_size[1]))
-            if grid_position != tail_grid_position:
-                body_positions.append(grid_position)
-    return body_positions, tail_position
-
-
 def process_frame(frame):
     """Process the current frame to extract game state."""
-    snake_head, snake_direction = detect_snake_head(frame)
-    snake_body_positions, snake_tail = detect_snake_body(frame)
+    snake_head, _ = detect_snake_head(frame)
     food_position = detect_food(frame)
-    return snake_head, snake_direction, food_position, snake_tail, snake_body_positions
 
+    if snake_head and food_position:
+        snake_head_grid = (snake_head[1] // (bounding_box[3] // grid_size[0]),
+                           snake_head[0] // (bounding_box[2] // grid_size[1]))
+
+        food_grid = (food_position[1] // (bounding_box[3] // grid_size[0]),
+                     food_position[0] // (bounding_box[2] // grid_size[1]))
+
+        return snake_head_grid, food_grid
+
+    return None, None
 
 def wrap_position(pos, max_x, max_y):
     """Handle wrapping behavior across the screen edges."""
     return pos[0] % max_x, pos[1] % max_y
-
 
 def bfs(start, goal, grid):
     """Breadth-First Search (BFS) algorithm for pathfinding."""
@@ -130,7 +111,6 @@ def bfs(start, goal, grid):
 
     return None
 
-
 def get_direction(from_pos, to_pos):
     """Get the direction from one position to another."""
     if to_pos[0] < from_pos[0]:
@@ -142,37 +122,29 @@ def get_direction(from_pos, to_pos):
     if to_pos[1] > from_pos[1]:
         return 'right'
 
-
-def create_debug_grid(snake_pos, food_pos, snake_body_positions, path):
+def create_debug_grid(snake_head_pos, food_pos, path):
     """Create a debug grid visualization."""
     grid_image = np.zeros((grid_size[0] * 20, grid_size[1] * 20, 3), dtype=np.uint8)
 
     # Colors
-    snake_body_color = (0, 255, 0)  # Green for snake body
+    snake_head_color = (0, 255, 0)  # Green for snake head
     path_color = (255, 255, 0)  # Yellow for path
     food_color = (0, 0, 255)  # Red for food
 
     for y in range(grid_size[0]):
         for x in range(grid_size[1]):
-            # Draw grid cell border
-            cv2.rectangle(grid_image, (x * 20, y * 20),
-                          ((x + 1) * 20 - 1, (y + 1) * 20 - 1), (255, 255, 255), 1)  # White grid lines
+            cv2.rectangle(grid_image, (x * 20, y * 20), ((x + 1) * 20 - 1, (y + 1) * 20 - 1), (255, 255, 255), 1)
 
-    for pos in snake_body_positions:
-        if 0 <= pos[0] < grid_size[0] and 0 <= pos[1] < grid_size[1]:
-            cv2.rectangle(grid_image, (pos[1] * 20, pos[0] * 20),
-                          ((pos[1] + 1) * 20 - 1, (pos[0] + 1) * 20 - 1), snake_body_color, -1)
+    if snake_head_pos:
+        head_y, head_x = snake_head_pos
+        cv2.rectangle(grid_image, (head_x * 20, head_y * 20),
+                      ((head_x + 1) * 20 - 1, (head_y + 1) * 20 - 1), snake_head_color, -1)
 
     if path:
         for pos in path:
             if 0 <= pos[0] < grid_size[0] and 0 <= pos[1] < grid_size[1]:
                 cv2.rectangle(grid_image, (pos[1] * 20, pos[0] * 20),
                               ((pos[1] + 1) * 20 - 1, (pos[0] + 1) * 20 - 1), path_color, -1)
-
-    if snake_pos:
-        snake_y, snake_x = snake_pos
-        cv2.rectangle(grid_image, (snake_x * 20, snake_y * 20),
-                      ((snake_x + 1) * 20 - 1, (snake_y + 1) * 20 - 1), snake_body_color, -1)
 
     if food_pos:
         food_y, food_x = food_pos
@@ -181,9 +153,8 @@ def create_debug_grid(snake_pos, food_pos, snake_body_positions, path):
 
     return grid_image
 
-
 def analyze_game():
-    global snake_head_grid, food_grid, previous_food_position, current_path, frame_count, snake_body_positions
+    global snake_head_grid, food_grid, previous_food_position, current_path, frame_count
 
     while True:
         frame_count += 1
@@ -192,30 +163,23 @@ def analyze_game():
 
         screen = np.array(pyautogui.screenshot(region=bounding_box))
         frame = cv2.cvtColor(screen, cv2.COLOR_BGR2RGB)
-        snake_head, snake_direction, food_position, snake_tail, snake_body_positions = process_frame(frame)
+        snake_head_grid, food_grid = process_frame(frame)
 
-        if snake_head and food_position:
-            snake_head_grid = (snake_head[1] // (bounding_box[3] // grid_size[0]),
-                               snake_head[0] // (bounding_box[2] // grid_size[1]))
-            food_grid = (food_position[1] // (bounding_box[3] // grid_size[0]),
-                         food_position[0] // (bounding_box[2] // grid_size[1]))
-
-            if previous_food_position != food_position or not current_path:
+        if snake_head_grid and food_grid:
+            if previous_food_position != food_grid or not current_path:
                 grid = np.zeros(grid_size)
-                grid[snake_head_grid] = 1
 
-                for body_pos in snake_body_positions:
-                    if 0 <= body_pos[0] < grid_size[0] and 0 <= body_pos[1] < grid_size[1]:
-                        grid[body_pos[0], body_pos[1]] = 1
+                # Set grid positions for head
+                if snake_head_grid:
+                    grid[snake_head_grid] = 1
 
                 current_path = bfs(snake_head_grid, food_grid, grid)
 
-            previous_food_position = food_position
+            previous_food_position = food_grid
 
-            debug_grid = create_debug_grid(snake_head_grid, food_grid, snake_body_positions, current_path or [])
+            debug_grid = create_debug_grid(snake_head_grid, food_grid, current_path or [])
             cv2.imshow('Debug Grid', debug_grid)
             cv2.waitKey(1)
-
 
 def control_snake():
     global current_path, snake_head_grid
@@ -224,23 +188,24 @@ def control_snake():
     key_delay = 0.1
 
     while True:
-        if current_path:
-            next_move = current_path[1] if len(current_path) > 1 else current_path[0]
-            direction = get_direction(snake_head_grid, next_move)
-            current_path.pop(0)
+        with lock:
+            if current_path and snake_head_grid:
+                next_move = current_path[1] if len(current_path) > 1 else current_path[0]
+                if next_move:
+                    direction = get_direction(snake_head_grid, next_move)
+                    current_path.pop(0)
 
-            current_time = time.time()
-            if current_time - last_key_time > key_delay:
-                if direction == 'up':
-                    pyautogui.press('up')
-                elif direction == 'down':
-                    pyautogui.press('down')
-                elif direction == 'left':
-                    pyautogui.press('left')
-                elif direction == 'right':
-                    pyautogui.press('right')
-                last_key_time = current_time
-
+                    current_time = time.time()
+                    if current_time - last_key_time > key_delay:
+                        if direction == 'up':
+                            pyautogui.press('up')
+                        elif direction == 'down':
+                            pyautogui.press('down')
+                        elif direction == 'left':
+                            pyautogui.press('left')
+                        elif direction == 'right':
+                            pyautogui.press('right')
+                        last_key_time = current_time
 
 # Start threads for analysis and control
 analyze_thread = threading.Thread(target=analyze_game)
